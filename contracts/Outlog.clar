@@ -10,6 +10,7 @@
 (define-constant err-already-escalated (err u108))
 (define-constant err-too-early (err u109))
 (define-constant err-invalid-resolution (err u110))
+(define-constant err-appeal-cooldown (err u111))
 
 (define-data-var next-outage-id uint u1)
 (define-data-var total-compensation-pool uint u0)
@@ -91,6 +92,21 @@
     alert-block: uint,
     population-affected: uint
   }
+)
+
+(define-map appeal-records
+  { outage-id: uint, utility: principal }
+  { appealed: bool, appeal-block: uint, outcome: (string-ascii 20) }
+)
+
+(define-map utility-appeal-cooldown
+  principal
+  { last-appeal-block: uint, next-available-block: uint }
+)
+
+(define-map appeal-counter
+  principal
+  uint
 )
 
 (define-public (authorize-utility (utility principal) (name (string-ascii 32)))
@@ -290,6 +306,42 @@
   )
 )
 
+(define-public (appeal-escalation (outage-id uint))
+  (let (
+    (utility tx-sender)
+    (outage-data (unwrap! (map-get? outage-reports { outage-id: outage-id }) err-not-found))
+    (escalation-data (map-get? escalations { outage-id: outage-id }))
+    (cooldown-data (map-get? utility-appeal-cooldown utility))
+    (current-block stacks-block-height)
+    (appeal-exists (map-get? appeal-records { outage-id: outage-id, utility: utility }))
+  )
+    (asserts! (is-eq (get reporter outage-data) utility) err-unauthorized)
+    (asserts! (is-some escalation-data) err-not-found)
+    (asserts! (is-none appeal-exists) err-already-exists)
+    (asserts! 
+      (or 
+        (is-none cooldown-data)
+        (>= current-block (get next-available-block (unwrap! cooldown-data err-appeal-cooldown)))
+      )
+      err-appeal-cooldown
+    )
+    (map-set appeal-records
+      { outage-id: outage-id, utility: utility }
+      { appealed: true, appeal-block: current-block, outcome: "pending" }
+    )
+    (map-set utility-appeal-cooldown
+      utility
+      { last-appeal-block: current-block, next-available-block: (+ current-block u50) }
+    )
+    (map-set appeal-counter
+      utility
+      (+ (default-to u0 (map-get? appeal-counter utility)) u1)
+    )
+    (print { event: "escalation-appealed", outage-id: outage-id, utility: utility })
+    (ok true)
+  )
+)
+
 (define-private (trigger-emergency-alert (outage-id uint) (population-affected uint))
   (begin
     (map-set emergency-alerts
@@ -464,4 +516,28 @@
 
 (define-read-only (get-critical-threshold)
   (var-get critical-population-threshold)
+)
+
+(define-read-only (can-utility-appeal (utility principal))
+  (let (
+    (cooldown-data (map-get? utility-appeal-cooldown utility))
+    (current-block stacks-block-height)
+  )
+(match cooldown-data
+      cooldown-info (>= current-block (get next-available-block cooldown-info))
+      true
+    )
+  )
+)
+
+(define-read-only (get-appeal-record (outage-id uint) (utility principal))
+  (map-get? appeal-records { outage-id: outage-id, utility: utility })
+)
+
+(define-read-only (get-utility-appeal-count (utility principal))
+  (default-to u0 (map-get? appeal-counter utility))
+)
+
+(define-read-only (get-utility-cooldown-info (utility principal))
+  (map-get? utility-appeal-cooldown utility)
 )
